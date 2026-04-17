@@ -8,7 +8,7 @@ Security proxy for AI agent with access control and WebUI.
 - Auto-generated CA certificates
 - Whitelist/blacklist access control with glob patterns
 - Interval-based rate limiting (global; per-rule TODO)
-- Pending request queue with timeout (admin approval UI TODO)
+- Pending request queue with timeout (admin approval UI)
 - Per-rule statistics (TODO)
 - Logs with autorotation
 - Real-time WebUI: dashboard, pending viewer, rule management (rate-limit viewer and log viewer TODO)
