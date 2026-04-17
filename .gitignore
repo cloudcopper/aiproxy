@@ -1,0 +1,10 @@
+.*
+!.gitignore
+/coverage.out
+/aiproxy
+
+# Runtime directories (volume mounts - not in git per IDEA.md)
+/certs/
+/rules/
+/data/
+/logs/

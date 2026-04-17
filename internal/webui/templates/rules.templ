@@ -1,0 +1,462 @@
+package templates
+
+import "strconv"
+
+var (
+	ruleMethodOptions = []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+	ruleSchemeOptions = []string{"http", "https"}
+)
+
+// priorityValue returns the submitted priority string if non-empty,
+// otherwise formats the computed default as a string.
+func priorityValue(submitted string, defaultVal int) string {
+	if submitted != "" {
+		return submitted
+	}
+	return strconv.Itoa(defaultVal)
+}
+
+// nextPriority returns the suggested priority for the next new rule:
+// last rule's priority + 1, or 0 when the list is empty.
+// Rules are already sorted (priority ASC, id ASC) so the last element
+// always carries the highest priority number.
+func nextPriority(rules []RuleRowData) int {
+	if len(rules) == 0 {
+		return 0
+	}
+	return rules[len(rules)-1].Priority + 1
+}
+
+// RuleRowData holds display-ready data for a single rule row.
+type RuleRowData struct {
+	ID       string
+	Priority int
+	Comment  string
+	Method   string
+	Scheme   string
+	Host     string
+	Path     string
+	Runtime  bool // false = static (read-only), true = runtime (editable/deletable via WebUI)
+}
+
+// RuleFormValues holds the submitted (or pre-populated) values for the add-rule form row.
+type RuleFormValues struct {
+	ID       string
+	Priority string // raw string; parsed to int by handler (preserved for error re-render)
+	Method   string
+	Scheme   string
+	Host     string
+	Path     string
+	Comment  string
+}
+
+// RulesSectionData holds data for one rules section (whitelist or blacklist).
+type RulesSectionData struct {
+	ListType string // "whitelist" or "blacklist"
+	Title    string // e.g. "Whitelist Rules"
+	Rules    []RuleRowData
+	FormVals RuleFormValues // pre-populated on validation error
+	ErrMsg   string         // non-empty when the last add attempt failed
+}
+
+// RulesPageData holds data for the full rules management page.
+type RulesPageData struct {
+	Nav           NavData
+	Whitelist     RulesSectionData
+	Blacklist     RulesSectionData
+	PrefillTarget string // "whitelist" or "blacklist" - which section has prefilled form values
+}
+
+// RulesPage renders the full rules management page with two sections.
+// Sections are rendered in processing order: blacklist first, whitelist second.
+templ RulesPage(data RulesPageData) {
+	@Base("Rules", data.Nav) {
+		@RulesSection(data.Blacklist)
+		@RulesSection(data.Whitelist)
+		<script>
+			// ---------------------------------------------------------------
+			// Add-row / edit-row repositioning.
+			// Fires on any input with data-reposition (add-row inputs baked
+			// in from template; edit-row priority input added by startEdit).
+			// ---------------------------------------------------------------
+			document.addEventListener('input', function(e) {
+				var input = e.target;
+				if (!input.hasAttribute('data-reposition')) return;
+				var listType = input.dataset.listType;
+				var tbody = document.getElementById(listType + '-rows');
+				if (!tbody) return;
+
+				// Which row are we repositioning?
+				var addRow  = document.getElementById(listType + '-add-row');
+				var editRow = tbody.querySelector('tr.editing');
+				var rowToMove = null;
+				if (addRow  && addRow.contains(input))  rowToMove = addRow;
+				if (editRow && editRow.contains(input)) rowToMove = editRow;
+				if (!rowToMove) return;
+
+				// Save cursor before DOM move (moving a node clears focus).
+				var selStart = null, selEnd = null;
+				try { selStart = input.selectionStart; selEnd = input.selectionEnd; } catch(ex) {}
+
+				// Effective ID and priority of the row being moved.
+				var typedId, typedPri;
+				if (rowToMove === addRow) {
+					var idInput  = addRow.querySelector('input[name="id"]');
+					var priInput = addRow.querySelector('input[name="priority"]');
+					typedId  = idInput  ? idInput.value  : '';
+					typedPri = priInput ? parseInt(priInput.value || '0', 10) : 0;
+				} else {
+					// Editing row: ID is fixed; only priority drives repositioning.
+					typedId  = rowToMove.dataset.ruleId || '';
+					var priInput = rowToMove.querySelector('input[name="priority"]');
+					typedPri = priInput ? parseInt(priInput.value || '0', 10) : 0;
+				}
+				if (isNaN(typedPri)) typedPri = 0;
+
+				// All rows except the one being moved.
+				var rows = Array.from(tbody.querySelectorAll('tr[data-rule-id]')).filter(function(r) {
+					return r !== rowToMove;
+				});
+
+				// Add-row with empty ID and zero priority stays at the bottom.
+				if (rowToMove === addRow && !typedId && typedPri === 0) {
+					tbody.appendChild(rowToMove);
+				} else {
+					var insertBefore = null;
+					for (var i = 0; i < rows.length; i++) {
+						var rowPri = parseInt(rows[i].dataset.rulePriority || '0', 10);
+						if (rowPri > typedPri || (rowPri === typedPri && rows[i].dataset.ruleId > typedId)) {
+							insertBefore = rows[i];
+							break;
+						}
+					}
+					if (insertBefore) {
+						tbody.insertBefore(rowToMove, insertBefore);
+					} else {
+						tbody.appendChild(rowToMove);
+					}
+				}
+
+				// Restore focus and cursor after the DOM move.
+				input.focus();
+				try { if (selStart !== null) input.setSelectionRange(selStart, selEnd); } catch(ex) {}
+			});
+
+			// ---------------------------------------------------------------
+			// In-place row editing: delegated click handler.
+			// ---------------------------------------------------------------
+			document.addEventListener('click', function(e) {
+				var btn = e.target.closest('[data-action]');
+				if (!btn) return;
+				switch (btn.dataset.action) {
+					case 'edit':   startEdit(btn);  break;
+					case 'cancel': cancelEdit(btn); break;
+					case 'save':   saveEdit(btn);   break;
+				}
+			});
+
+			// Enter edit mode for a runtime row.
+			// Cancels any currently open edit row first (mutual exclusion).
+			function startEdit(btn) {
+				var existing = document.querySelector('tr.editing');
+				if (existing) cancelEdit(existing.querySelector('[data-action="cancel"]'));
+
+				var tr = btn.closest('tr');
+				var c  = tr.cells;
+				var lt = tr.dataset.listType;
+
+				// Cache the actions cell so Cancel can restore it (including htmx attrs).
+				tr.dataset.savedActions = c[7].innerHTML;
+
+			c[1].innerHTML = '<input type="number" name="priority" min="0" value="' + esc(tr.dataset.rulePriority || '0') + '" data-reposition="1" data-list-type="' + esc(lt) + '" class="input-priority">';
+			c[2].innerHTML = sel('method', ['', 'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'], tr.dataset.ruleMethod);
+			c[3].innerHTML = sel('scheme', ['', 'http', 'https'], tr.dataset.ruleScheme);
+			c[4].innerHTML = '<input type="text" name="host"    value="' + esc(tr.dataset.ruleHost    || '') + '" class="input-wide">';
+			c[5].innerHTML = '<input type="text" name="path"    value="' + esc(tr.dataset.rulePath    || '') + '" class="input-path">';
+			c[6].innerHTML = '<input type="text" name="comment" value="' + esc(tr.dataset.ruleComment || '') + '" class="input-wide">';
+			c[7].innerHTML =
+				'<button type="button" data-action="save" data-list-type="' + esc(lt) + '" class="btn-compact">Save</button> ' +
+				'<button type="button" data-action="cancel" class="btn-compact">Cancel</button>';
+
+				tr.classList.add('editing');
+				c[1].querySelector('input').focus();
+			}
+
+			// Exit edit mode, restoring the row to its original view state.
+			function cancelEdit(btn) {
+				var tr = btn ? btn.closest('tr') : document.querySelector('tr.editing');
+				if (!tr) return;
+				var c = tr.cells;
+
+				// Remove any inline validation error.
+				var err = tr.querySelector('.edit-error');
+				if (err) err.remove();
+
+				// Restore display cells from data-* (committed server-side values).
+				c[1].textContent = tr.dataset.rulePriority || '0';
+				c[2].textContent = tr.dataset.ruleMethod   || '';
+				c[3].textContent = tr.dataset.ruleScheme   || '';
+				c[4].textContent = tr.dataset.ruleHost     || '';
+				c[5].textContent = tr.dataset.rulePath     || '';
+				c[6].textContent = tr.dataset.ruleComment  || '';
+
+				// Restore actions cell and re-register htmx attributes on the delete button.
+				c[7].innerHTML = tr.dataset.savedActions || '';
+				htmx.process(c[7]);
+
+				tr.classList.remove('editing');
+				delete tr.dataset.savedActions;
+			}
+
+			// Save the edited row via PUT.
+			// 200 → full tbody swap (correct sort position).
+			// 422 → plain-text error shown inline in the ID cell (always in viewport).
+			async function saveEdit(btn) {
+				var tr       = btn.closest('tr');
+				var listType = btn.dataset.listType;
+				var id       = tr.dataset.ruleId;
+
+				// Clear any previous inline error.
+				var err = tr.querySelector('.edit-error');
+				if (err) err.remove();
+
+				// Collect all named inputs from the edit row.
+				var body = new URLSearchParams();
+				tr.querySelectorAll('input[name], select[name]').forEach(function(el) {
+					body.append(el.name, el.value);
+				});
+
+				btn.disabled = true;
+				var resp;
+				try {
+					resp = await fetch('/api/rules/' + listType + '/' + encodeURIComponent(id), {
+						method:  'PUT',
+						headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'HX-Request': 'true' },
+						body:    body
+					});
+				} catch(ex) { btn.disabled = false; return; }
+
+				if (resp.ok) {
+					// Replace the entire tbody so the row lands in correct sort position.
+					var html   = await resp.text();
+					var tbody  = document.getElementById(listType + '-rows');
+					tbody.outerHTML = html;
+					var newTbody = document.getElementById(listType + '-rows');
+					if (newTbody) htmx.process(newTbody); // re-register htmx attrs on delete buttons
+				} else {
+					// 422: show plain-text error inline in the ID cell (always visible to user).
+					var msg = (await resp.text()).trim();
+				var el  = document.createElement('small');
+				el.className   = 'edit-error text-error';
+					el.textContent = msg;
+					tr.cells[0].appendChild(document.createElement('br'));
+					tr.cells[0].appendChild(el);
+					btn.disabled = false;
+				}
+			}
+
+			// Build a <select> HTML string with the given options and pre-selected value.
+			function sel(name, opts, selected) {
+				var s = '<select name="' + esc(name) + '">';
+				for (var i = 0; i < opts.length; i++) {
+					var v = opts[i];
+					s += '<option value="' + esc(v) + '"' + (v === (selected || '') ? ' selected' : '') + '>' + esc(v || 'any') + '</option>';
+				}
+				return s + '</select>';
+			}
+
+			// HTML-escape a string for safe injection into attribute values.
+			function esc(s) {
+				return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+			}
+
+			// ---------------------------------------------------------------
+			// Auto-generate rule ID on prefill (from pending page buttons).
+			// Scans existing rule IDs in the target section, finds the highest
+			// numeric suffix matching wl-NNN / bl-NNN, and returns the next one.
+			// Falls back to wl-001 / bl-001 when no matching IDs exist.
+			// ---------------------------------------------------------------
+			function generateNextRuleId(listType) {
+				var prefix = listType === 'whitelist' ? 'wl-' : 'bl-';
+				var re = /^(?:wl|bl)-(\d+)$/;
+				var max = 0;
+				var tbody = document.getElementById(listType + '-rows');
+				if (tbody) {
+					tbody.querySelectorAll('tr[data-rule-id]').forEach(function(tr) {
+						var m = tr.dataset.ruleId.match(re);
+						if (m) {
+							var n = parseInt(m[1], 10);
+							if (n > max) max = n;
+						}
+					});
+				}
+				return prefix + String(max + 1).padStart(3, '0');
+			}
+
+			// On page load: if ?prefill is set, auto-fill the ID input with the
+			// next sequential ID for that section (only when the field is empty,
+			// so server-side error re-renders that carry an existing value are untouched).
+			(function() {
+				var params = new URLSearchParams(window.location.search);
+				var prefill = params.get('prefill');
+				if (prefill !== 'whitelist' && prefill !== 'blacklist') return;
+				var addRow = document.getElementById(prefill + '-add-row');
+				if (!addRow) return;
+				var idInput = addRow.querySelector('input[name="id"]');
+				if (!idInput || idInput.value) return;
+				idInput.value = generateNextRuleId(prefill);
+				idInput.dispatchEvent(new Event('input', { bubbles: true }));
+			})();
+		</script>
+	}
+}
+
+// RulesSection renders one article block (whitelist or blacklist) with its table.
+templ RulesSection(section RulesSectionData) {
+	<article>
+		<header><strong>{ section.Title }</strong></header>
+		<div class="table-scroll">
+			<table class="striped">
+				<thead>
+					<tr>
+						<th>ID</th>
+						<th>Priority</th>
+						<th>Method</th>
+						<th>Scheme</th>
+						<th>Host</th>
+						<th>Path</th>
+						<th>Comment</th>
+						<th>Actions</th>
+					</tr>
+				</thead>
+				@RulesSectionBody(section)
+			</table>
+		</div>
+	</article>
+}
+
+// RulesSectionBody renders the <tbody> fragment returned by add/delete/edit handlers.
+// htmx swaps the entire <tbody> element (outerHTML) on each mutation.
+templ RulesSectionBody(section RulesSectionData) {
+	<tbody id={ section.ListType + "-rows" }>
+		for _, rule := range section.Rules {
+			@RuleRow(rule, section.ListType)
+		}
+		@RulesAddRow(section.ListType, section.FormVals, section.ErrMsg, nextPriority(section.Rules))
+	</tbody>
+}
+
+// RuleRow renders a single existing rule row.
+// Runtime rules get Edit + Delete buttons; static rules show a read-only badge.
+// All field values are stored in data-* attributes for client-side edit mode.
+templ RuleRow(r RuleRowData, listType string) {
+	<tr
+		data-rule-id={ r.ID }
+		data-rule-priority={ strconv.Itoa(r.Priority) }
+		data-rule-method={ r.Method }
+		data-rule-scheme={ r.Scheme }
+		data-rule-host={ r.Host }
+		data-rule-path={ r.Path }
+		data-rule-comment={ r.Comment }
+		data-list-type={ listType }
+	>
+		<td>{ r.ID }</td>
+		<td>{ strconv.Itoa(r.Priority) }</td>
+		<td>{ r.Method }</td>
+		<td>{ r.Scheme }</td>
+		<td>{ r.Host }</td>
+		<td>{ r.Path }</td>
+		<td>{ r.Comment }</td>
+		<td class="td-actions">
+			if r.Runtime {
+			<button
+				type="button"
+				data-action="edit"
+				class="outline btn-compact"
+			>Edit</button>
+				<button
+				type="button"
+				hx-delete={ "/api/rules/" + listType + "/" + r.ID }
+				hx-confirm={ "Delete rule '" + r.ID + "'?" }
+				hx-target={ "#" + listType + "-rows" }
+				hx-swap="outerHTML"
+				class="outline btn-compact"
+			>Delete</button>
+			} else {
+				<small>static</small>
+			}
+		</td>
+	</tr>
+}
+
+// RulesAddRow renders the inline add-rule form row at the bottom of a tbody.
+// Repositions to its sorted position as the user types ID or priority (client-side JS).
+// On validation error vals and errMsg are pre-populated so the user can correct and resubmit.
+// defaultPriority pre-fills the priority input when vals.Priority is empty (last rule + 1).
+templ RulesAddRow(listType string, vals RuleFormValues, errMsg string, defaultPriority int) {
+	<tr id={ listType + "-add-row" }>
+		<td>
+		<input
+			type="text"
+			name="id"
+			value={ vals.ID }
+			placeholder="rule-id"
+			required
+			data-reposition="1"
+			data-list-type={ listType }
+			class="input-wide"
+		/>
+			if errMsg != "" {
+				<br/>
+				<small class="text-error">{ errMsg }</small>
+			}
+		</td>
+		<td>
+		<input
+			type="number"
+			name="priority"
+			value={ priorityValue(vals.Priority, defaultPriority) }
+			min="0"
+			step="1"
+			data-reposition="1"
+			data-list-type={ listType }
+			class="input-priority"
+		/>
+		</td>
+		<td>
+			<select name="method">
+				<option value="" selected?={ vals.Method == "" }>any</option>
+				for _, method := range ruleMethodOptions {
+					<option value={ method } selected?={ vals.Method == method }>{ method }</option>
+				}
+			</select>
+		</td>
+		<td>
+			<select name="scheme">
+				<option value="" selected?={ vals.Scheme == "" }>any</option>
+				for _, scheme := range ruleSchemeOptions {
+					<option value={ scheme } selected?={ vals.Scheme == scheme }>{ scheme }</option>
+				}
+			</select>
+		</td>
+		<td>
+			<input type="text" name="host" value={ vals.Host } placeholder="api.example.com" class="input-wide"/>
+		</td>
+		<td>
+			<input type="text" name="path" value={ vals.Path } placeholder="/v1/**" class="input-path"/>
+		</td>
+		<td>
+			<input type="text" name="comment" value={ vals.Comment } placeholder="description" class="input-wide"/>
+		</td>
+		<td class="td-actions">
+		<button
+			type="button"
+			hx-post={ "/api/rules/" + listType }
+			hx-include="closest tr"
+			hx-target={ "#" + listType + "-rows" }
+			hx-swap="outerHTML"
+			class="btn-compact"
+		>Add</button>
+		</td>
+	</tr>
+}

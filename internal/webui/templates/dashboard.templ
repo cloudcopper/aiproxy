@@ -1,0 +1,78 @@
+package templates
+
+import (
+	"crypto/x509"
+	"fmt"
+	"time"
+)
+
+// DashboardData holds all the data needed to render the dashboard page.
+type DashboardData struct {
+	Nav              NavData
+	StartTime        time.Time
+	GlobalRateLimit  int // 0 = unlimited
+	Cert             *x509.Certificate
+	RequestCount     uint64
+	PendingCount     int
+	RateLimitedCount int
+}
+
+// uptime formats the duration since start as a human-readable string.
+func uptime(start time.Time) string {
+	d := time.Since(start)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+// rateLimitDisplay formats the rate limit setting for display.
+func rateLimitDisplay(rpm int) string {
+	if rpm == 0 {
+		return "unlimited"
+	}
+	return fmt.Sprintf("%d req/min", rpm)
+}
+
+// DashboardPage renders the full dashboard page.
+templ DashboardPage(data DashboardData) {
+	@Base("Dashboard", data.Nav) {
+		<article>
+			<header><strong>Status</strong></header>
+			<div id="live-stats" hx-sse:connect="/api/dashboard/stream" hx-swap="innerHTML" aria-live="polite" aria-atomic="true">
+				@StatusFragment(data)
+			</div>
+		</article>
+		if data.Cert != nil {
+			<article>
+				<header><strong>CA Certificate</strong></header>
+				<p>Subject: { data.Cert.Subject.CommonName }</p>
+				<p>Valid until: { data.Cert.NotAfter.Format("2006-01-02") }</p>
+				<a href="/download-cert" role="button" class="outline">Download CA Certificate</a>
+			</article>
+		}
+	}
+}
+
+// StatusFragment renders the live status fragment sent via SSE.
+// It includes live uptime and all request counters.
+templ StatusFragment(data DashboardData) {
+	<dl>
+		<dt>Uptime</dt>
+		<dd>{ uptime(data.StartTime) }</dd>
+		<dt>Processed requests</dt>
+		<dd>{ fmt.Sprintf("%d", data.RequestCount) }</dd>
+		<dt>Pending</dt>
+		<dd>{ fmt.Sprintf("%d", data.PendingCount) }</dd>
+		<dt>Rate limited</dt>
+		<dd>{ fmt.Sprintf("%d", data.RateLimitedCount) }</dd>
+		<dt>Rate limit</dt>
+		<dd>{ rateLimitDisplay(data.GlobalRateLimit) }</dd>
+	</dl>
+}

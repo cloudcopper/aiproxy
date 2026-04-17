@@ -1,0 +1,74 @@
+/* Override Pico's fixed-pixel container breakpoints with a fluid, percentage-based width
+   that still caps at 1800px to avoid extreme stretching on ultrawide/4K monitors. */
+.container {
+    max-width: min(95%, 1800px);
+}
+
+/* Compact action buttons (Edit, Delete, Save, Cancel, Add, Blacklist, Whitelist) */
+.btn-compact {
+    display: inline-block;
+    width: auto;
+    margin: 0;
+    padding: 0.18rem 0.5rem;
+}
+
+/* Vertically center all table cell content (inputs, selects, buttons).
+   Also reduce Pico's default form-element padding so rows stay compact:
+   vertical 0.75rem→0.18rem, horizontal 1rem→0.5rem. */
+table td {
+    vertical-align: middle;
+    --pico-form-element-spacing-vertical: 0.18rem;
+    --pico-form-element-spacing-horizontal: 0.5rem;
+}
+
+/* Remove Pico's default bottom margin on form elements inside table cells
+   so vertical-align: middle centers them correctly (margin shifts visual center upward).
+   The :not() mirrors Pico's own selector to win the specificity battle (0,1,3 vs Pico's 0,1,1). */
+table td input:not([type=checkbox],[type=radio],[type=range],[type=file]),
+table td select {
+    margin-bottom: 0;
+}
+
+/* Prevent Method/Scheme (and any future) selects from being squeezed below readable width */
+table td select {
+    min-width: 8rem;
+}
+
+/* Wide inputs (id, host, comment fields) */
+.input-wide {
+    min-width: 8rem;
+}
+
+/* Path inputs */
+.input-path {
+    min-width: 6rem;
+}
+
+/* Priority number input */
+.input-priority {
+    width: 5rem;
+}
+
+/* Horizontally scrollable table wrapper */
+.table-scroll {
+    overflow-x: auto;
+}
+
+/* Inline validation error text */
+.text-error {
+    color: var(--pico-color-red-500, red);
+}
+
+/* Login message colors: warning (amber) for security notices, error (red) for auth failures */
+.message-warning {
+    color: #d97706;
+}
+
+.message-error {
+    color: var(--pico-del-color);
+}
+
+/* Keep action buttons (Edit+Delete, Save+Cancel, Add) on a single line */
+.td-actions {
+    white-space: nowrap;
+}

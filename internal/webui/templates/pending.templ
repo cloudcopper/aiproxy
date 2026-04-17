@@ -1,0 +1,125 @@
+package templates
+
+import (
+	"fmt"
+	"net/url"
+)
+
+// PendingItemData holds display-ready data for a single pending request row.
+type PendingItemData struct {
+	Method       string
+	URL          string
+	WaitersCount int
+	Elapsed      string // e.g. "10s"
+	Remaining   string // e.g. "1m50s" or "expired"
+}
+
+// URLParts holds parsed components from a URL string.
+type URLParts struct {
+	Scheme string
+	Host  string
+	Path  string
+}
+
+// ParseURL extracts scheme, host, and path from a URL string.
+// If the URL is malformed or missing scheme, returns empty parts.
+func ParseURL(rawURL string) URLParts {
+	// Try parsing as-is first
+	u, err := url.Parse(rawURL)
+	if err == nil && u.Scheme != "" {
+		// Has scheme (e.g., "https://api.openai.com/v1/chat")
+		return URLParts{
+			Scheme: u.Scheme,
+			Host:  u.Host,
+			Path:  u.Path,
+		}
+	}
+	// No scheme: treat as host/path (e.g., "api.openai.com/v1/chat")
+	// Prepend a dummy scheme so url.Parse can extract components
+	u, err = url.Parse("http://" + rawURL)
+	if err != nil {
+		return URLParts{}
+	}
+	return URLParts{
+		Scheme: "", // Omit scheme for prefill - user adds manually
+		Host:  u.Host,
+		Path:  u.Path,
+	}
+}
+
+// RulesLink builds a query-string URL for navigating to rules page with prefill data.
+func RulesLink(listType, method string, urlParts URLParts) string {
+	return fmt.Sprintf("/rules?prefill=%s&method=%s&scheme=%s&host=%s&path=%s",
+		listType, method, urlParts.Scheme, urlParts.Host, urlParts.Path)
+}
+
+// PendingData holds data for the full pending requests page.
+type PendingData struct {
+	Nav   NavData
+	Items []PendingItemData
+}
+
+// PendingPage renders the full pending requests page.
+templ PendingPage(data PendingData) {
+	@Base("Pending Requests", data.Nav) {
+		<article>
+			<header><strong>Pending Requests</strong></header>
+			<table class="striped">
+				<thead>
+					<tr>
+						<th>Method</th>
+						<th>URL</th>
+						<th>Waiters</th>
+						<th>Elapsed</th>
+						<th>Remaining</th>
+						<th>Actions</th>
+					</tr>
+				</thead>
+				<tbody id="pending-rows" hx-sse:connect="/api/pending/stream" hx-swap="innerHTML" aria-live="polite" aria-atomic="false">
+					@PendingRowsFragment(data.Items)
+				</tbody>
+			</table>
+		</article>
+		<script>
+			document.addEventListener('click', function(e) {
+				var btn = e.target.closest('[data-navigate]');
+				if (btn) window.location.href = btn.dataset.navigate;
+			});
+		</script>
+	}
+}
+
+// PendingRowsFragment renders the tbody content.
+// Sent as an unnamed SSE event every 2 seconds (htmx v4 auto-swap).
+templ PendingRowsFragment(items []PendingItemData) {
+	if len(items) == 0 {
+		<tr><td colspan="6">No pending requests</td></tr>
+	} else {
+		for _, item := range items {
+			@PendingRow(item)
+		}
+	}
+}
+
+// PendingRow renders a single pending request row with action buttons.
+templ PendingRow(item PendingItemData) {
+	<tr>
+		<td>{ item.Method }</td>
+		<td>{ item.URL }</td>
+		<td>{ fmt.Sprintf("%d", item.WaitersCount) }</td>
+		<td>{ item.Elapsed }</td>
+		<td>{ item.Remaining }</td>
+		<td>
+		<button
+			type="button"
+			data-navigate={ RulesLink("blacklist", item.Method, ParseURL(item.URL)) }
+			class="outline btn-compact"
+		>Blacklist</button>
+			<button
+			type="button"
+			data-navigate={ RulesLink("whitelist", item.Method, ParseURL(item.URL)) }
+			class="outline btn-compact"
+		>Whitelist</button>
+		</td>
+	</tr>
+}

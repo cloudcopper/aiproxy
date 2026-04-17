@@ -1,0 +1,34 @@
+package templates
+
+// LoginData holds data for the login page.
+type LoginData struct {
+	Nav         NavData
+	AuthEnabled bool   // false → auth is disabled, show notice instead of form
+	ErrorMsg    string // non-empty → display message above the form
+	ErrorKind   string // "warning" for security notices (e.g. kicked), "error" for auth failures
+}
+
+// LoginPage renders the admin login page.
+templ LoginPage(data LoginData) {
+	@Base("Login", data.Nav) {
+		<article>
+			<header><strong>Admin Login</strong></header>
+			if !data.AuthEnabled {
+				<p>Admin access is disabled. Start the proxy with <code>--admin-secret</code> to enable login.</p>
+			} else {
+				if data.ErrorMsg != "" {
+					if data.ErrorKind == "warning" {
+						<p class="message-warning"><strong>{ data.ErrorMsg }</strong></p>
+					} else {
+						<p class="message-error"><strong>{ data.ErrorMsg }</strong></p>
+					}
+				}
+				<form method="POST" action="/login">
+					<label for="password">Admin password</label>
+					<input type="password" id="password" name="password" autocomplete="current-password" required/>
+					<button type="submit">Login</button>
+				</form>
+			}
+		</article>
+	}
+}
