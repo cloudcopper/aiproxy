@@ -285,6 +285,11 @@ func (p *Proxy) Start(ctx context.Context) error {
 // Addr returns the address the proxy is listening on.
 // Blocks until the listener is ready or context is cancelled.
 // Returns nil addr and error if context cancelled before listener ready.
+//
+// Note: If Start() fails before creating the listener (e.g., bind error),
+// this method will block indefinitely unless the caller also monitors
+// the error channel from Start(). The caller should use a select statement
+// that checks both Addr() completion and the Start() error channel.
 func (p *Proxy) Addr(ctx context.Context) (net.Addr, error) {
 	// Wait for listener to be ready or context cancellation
 	select {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -113,10 +114,24 @@ func main() {
 		}
 	})
 
-	// Wait for proxy to be ready
-	proxyAddr, err := proxyServer.Addr(ctx)
-	if err != nil {
-		slog.Error("failed to get proxy address", "error", err)
+	// Wait for proxy to be ready OR for Start() to fail
+	// We must check both channels to avoid deadlock if Start() fails before opening the listener
+	var proxyAddr net.Addr
+	var addrErr error
+	proxyReady := make(chan struct{})
+	go func() {
+		proxyAddr, addrErr = proxyServer.Addr(ctx)
+		close(proxyReady)
+	}()
+
+	select {
+	case <-proxyReady:
+		if addrErr != nil {
+			slog.Error("failed to get proxy address", "error", addrErr)
+			os.Exit(1)
+		}
+	case err := <-errChan:
+		slog.Error("proxy server failed to start", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("proxy server ready", "addr", proxyAddr)
@@ -139,15 +154,30 @@ func main() {
 			Rules:           proxyServer,
 		}
 		webuiServer := webui.NewServer(webuiCfg)
+		webuiErrChan := make(chan error, 1)
 		wg.Go(func() {
 			if err := webuiServer.Start(ctx); err != nil {
-				slog.Error("webui server failed", "error", err)
+				webuiErrChan <- err
 			}
 		})
 
-		webuiAddr, err := webuiServer.Addr(ctx)
-		if err != nil {
-			slog.Error("failed to get webui address", "error", err)
+		// Wait for WebUI to be ready OR for Start() to fail
+		var webuiAddr net.Addr
+		var webuiAddrErr error
+		webuiReady := make(chan struct{})
+		go func() {
+			webuiAddr, webuiAddrErr = webuiServer.Addr(ctx)
+			close(webuiReady)
+		}()
+
+		select {
+		case <-webuiReady:
+			if webuiAddrErr != nil {
+				slog.Error("failed to get webui address", "error", webuiAddrErr)
+				os.Exit(1)
+			}
+		case err := <-webuiErrChan:
+			slog.Error("webui server failed to start", "error", err)
 			os.Exit(1)
 		}
 		slog.Info("webui server ready", "addr", webuiAddr)
