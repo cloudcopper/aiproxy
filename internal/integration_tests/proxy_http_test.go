@@ -39,7 +39,6 @@ func TestProxy_Integration_HTTPForwarding(t *testing.T) {
 		RequestTimeout:           10 * time.Second,
 		PendingTimeout:           0, // immediate rejection for unclassified requests
 		DisableLocalhostBlocking: true, // Allow test server on 127.0.0.1
-		DisableConnectBlocking:   true, // Allow CONNECT for HTTPS tests
 	}
 
 	// Whitelist the backend so requests pass through.

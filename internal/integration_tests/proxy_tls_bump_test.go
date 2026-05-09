@@ -45,7 +45,6 @@ func TestProxy_Integration_TLSBumping(t *testing.T) {
 		RequestTimeout:           10 * time.Second,
 		PendingTimeout:           0, // immediate rejection for unclassified
 		DisableLocalhostBlocking: true, // Allow test server on 127.0.0.1
-		DisableConnectBlocking:   true, // Allow CONNECT for HTTPS tests
 	}
 
 	// Whitelist the TLS backend so requests pass through the pending queue.

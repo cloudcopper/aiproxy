@@ -52,14 +52,14 @@ HTTP/HTTPS proxy with access control and WebUI, designed for small containerized
 - Request/response inspection
 - Connection termination and forwarding
 - No proxy authentication (network-isolated deployment)
-- CONNECT method blocking (anti-tunneling):
-  - Blocks CONNECT to non-443 ports (prevents arbitrary TCP tunnels)
-  - Allows CONNECT to port 443 for HTTPS/TLS bumping
-  - 1-second delay before returning error (rate-limits scanner behavior)
-  - Returns HTTP 403 Forbidden with JSON error
-  - Configurable delay via `connectBlockDelay` constant
-  - No CLI flag to disable (security by design, test-only override)
-  - Works in combination with TLS bumping (not mutually exclusive)
+- Universal CONNECT MITM (auto-detect TLS vs HTTP):
+  - Accepts all CONNECT requests (any port) via MITM action
+  - Auto-detects TLS vs plain HTTP by peeking first byte
+  - 0x16 = TLS → full TLS MITM (generate fake cert from CA)
+  - Plain HTTP → routes through normal request pipeline (blacklist, whitelist, pending)
+  - Non-HTTP protocols naturally fail (can't parse HTTP)
+  - All tunneled traffic inspected by normal pipeline (default-deny via pending queue)
+  - More secure than port-based blocking (all traffic inspected)
 - Localhost IP protection (SSRF prevention):
   - Blocks requests targeting 127.0.0.0/8 or ::1
   - 1-second delay before returning error (rate-limits scanner behavior)
@@ -285,9 +285,8 @@ HTTP/HTTPS proxy with access control and WebUI, designed for small containerized
 1. Client request arrives at proxy
 2. TLS bumping (if HTTPS CONNECT to :443)
 3. Extract: method, URL, headers, client IP
-4. Check CONNECT METHOD to non-443 ports (anti-tunneling protection)
-   └─> CONNECT to non-443 port? → Sleep 1s → Reject with HTTP 403 + JSON error + Log at WARN
-   └─> CONNECT to :443? → TLS bump (MITM) → Continue to step 5
+4. Any CONNECT → Accept tunnel → MITM → normal pipeline
+   └─> CONNECT to any port → Accept → Peek first byte → TLS or HTTP → Continue to step 5
 5. Check LOCALHOST IPs (DNS resolution)
    └─> Resolves to 127.0.0.0/8 or ::1? → Sleep 1s → Reject with HTTP 403 + JSON error + Log at ERROR
 6. Check BLACKLIST (glob match)
@@ -429,14 +428,14 @@ TLS certificate files are stored at the configured `--tls-cert` and `--tls-key` 
   - URL patterns (prevent glob DoS like `**/**/**/**`)
   - Rate limits (positive integers only)
   - Method patterns (limited charset)
-- CONNECT method protection (anti-tunneling):
-  - CONNECT to non-443 ports blocked (prevents arbitrary TCP tunnel establishment)
-  - CONNECT to port 443 allowed for HTTPS/TLS bumping (MITM inspection)
-  - Logged at WARN level (security-relevant but less critical than SSRF)
-  - 1-second delay before rejection (rate-limits scanning behavior)
-  - Test-only disable flag (DisableConnectBlocking in proxy.Config)
-  - No production bypass mechanism (secure by default, no CLI flag)
-  - Implemented via conditional goproxy handlers (Not(ReqHostMatches(":443$")))
+- Universal CONNECT MITM (auto-detect TLS vs HTTP):
+  - All CONNECT requests accepted (any port) via ConnectMitm action
+  - Auto-detects TLS vs plain HTTP by peeking first byte
+  - 0x16 = TLS → full MITM (generate fake cert from CA)
+  - Plain HTTP → routes through normal pipeline (blacklist, whitelist, pending)
+  - Non-HTTP protocols can't parse and naturally fail
+  - All tunneled traffic inspected by normal pipeline (default-deny via pending queue)
+  - More secure than port-based blocking (all traffic inspected)
 - Localhost IP protection (SSRF prevention):
   - Blocks requests targeting 127.0.0.0/8 or ::1
   - Logged at ERROR level (potential SSRF attempt)
@@ -1121,7 +1120,6 @@ All proxy errors return JSON:
 ```
 
 Error types:
-- `connect_blocked` - CONNECT method not allowed (anti-tunneling protection)
 - `localhost_blocked` - Request targets localhost IP (SSRF protection)
 - `forbidden` - Blacklisted or pending timeout
 - `timeout` - Request timeout exceeded

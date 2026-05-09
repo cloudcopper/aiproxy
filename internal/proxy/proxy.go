@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"regexp"
 	"sync/atomic"
 	"time"
 
@@ -25,11 +24,6 @@ type Config struct {
 	RequestTimeout    time.Duration
 	GlobalRateLimit   int           // req/min (0 = unlimited)
 	PendingTimeout    time.Duration // 0 = immediate rejection mode (queue always active)
-
-	// DisableConnectBlocking disables CONNECT method blocking (TEST ONLY).
-	// This should NEVER be set to true in production code.
-	// It exists only to allow tests to establish CONNECT tunnels for testing.
-	DisableConnectBlocking bool
 
 	// DisableLocalhostBlocking disables SSRF protection (TEST ONLY).
 	// This should NEVER be set to true in production code.
@@ -147,37 +141,15 @@ func NewProxy(cfg *Config, caCert *x509.Certificate, caKey crypto.PrivateKey, bl
 	// Register request handler (logging + RequestID assignment)
 	goproxyInstance.OnRequest().DoFunc(p.onRequest)
 
-	// Register CONNECT handlers:
-	// Strategy: Allow CONNECT to :443 (HTTPS/TLS bumping), block all other ports
-	//
-	// Handler registration order (first non-nil result wins):
-	// 1. Block CONNECT to non-443 ports (if blocking enabled)
-	// 2. TLS bump CONNECT to :443 (if TLS certs provided)
-	//
-	// This allows:
-	// - HTTPS via TLS bumping (CONNECT to :443 → MITM → inspect)
-	// - Blocks arbitrary TCP tunnels (CONNECT to other ports → reject)
-
-	if !cfg.DisableConnectBlocking {
-		// Block CONNECT to all ports EXCEPT :443
-		// Pattern: NOT(host ends with :443)
-		port443Pattern := regexp.MustCompile(`:443$`)
-		goproxyInstance.OnRequest(goproxy.Not(goproxy.ReqHostMatches(port443Pattern))).
-			HandleConnect(p.blockConnectHandler())
-		slog.Info("CONNECT blocking enabled (non-443 ports blocked)")
-	}
-
-	// TLS bumping for HTTPS (CONNECT to :443)
-	// This runs AFTER the blocker, so :443 CONNECT requests pass through to here
-	if tlsBump != nil {
-		goproxyInstance.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(
-			func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-				return p.tlsBump.mitmConnect, host
-			},
-		))
-		// Note: If blocking enabled, only :443 reaches here (others blocked above)
-		// If blocking disabled, all CONNECT requests reach here
-	}
+	// Register CONNECT handler: Accept all CONNECT via MITM.
+	// goproxy's ConnectMitm peeks the first byte to auto-detect TLS vs HTTP.
+	// Both paths route through the normal request pipeline.
+	goproxyInstance.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(
+		func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+			return p.connectAction(), host
+		},
+	))
+	slog.Info("CONNECT MITM enabled (all ports, auto-detect TLS vs HTTP)")
 
 	// Register localhost IP blocker (SSRF protection) unless disabled for tests
 	if !cfg.DisableLocalhostBlocking {

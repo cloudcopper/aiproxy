@@ -5,6 +5,7 @@ package integration_tests
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,12 +14,14 @@ import (
 	"time"
 
 	"github.com/cloudcopper/aiproxy/internal/proxy"
+	"github.com/cloudcopper/aiproxy/internal/proxy/testdata"
+	"github.com/cloudcopper/aiproxy/internal/reqrules"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
-// TestProxy_Integration_HTTPSTunnel tests HTTPS CONNECT tunneling (no TLS bump).
+// TestProxy_Integration_HTTPSTunnel tests HTTPS CONNECT tunneling with TLS bump.
 func TestProxy_Integration_HTTPSTunnel(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -32,15 +35,26 @@ func TestProxy_Integration_HTTPSTunnel(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Start proxy
-	cfg := &proxy.Config{
-		Listen:                   "localhost:0", // random port
+	caCert, caKey := testdata.GenerateTestCA(t)
+
+	// Whitelist the backend so requests pass through.
+	wl := reqrules.New()
+	wl.Add(ruleFromServer(t, "allow-backend", "", backend.URL))
+
+	// Start proxy with TLS bumping
+	p := proxy.NewProxy(&proxy.Config{
+		Listen:                   "localhost:0",
 		ConnectionTimeout:        5 * time.Second,
 		RequestTimeout:           10 * time.Second,
-		DisableLocalhostBlocking: true, // Allow test server on 127.0.0.1
-		DisableConnectBlocking:   true, // Allow CONNECT for HTTPS tunneling test
-	}
-	p := proxy.NewProxy(cfg, nil, nil, nil, nil)
+		DisableLocalhostBlocking: true,
+	}, caCert, caKey, nil, wl)
+
+	// Configure proxy to trust the test backend's certificate.
+	backendCertPool := x509.NewCertPool()
+	backendCertPool.AddCert(backend.Certificate())
+	p.SetUpstreamTLSConfig(&tls.Config{
+		RootCAs: backendCertPool,
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -49,14 +63,18 @@ func TestProxy_Integration_HTTPSTunnel(t *testing.T) {
 		_ = p.Start(ctx)
 	}()
 
-	// Wait for proxy to start (blocks until listener ready)
+	// Wait for proxy to start
 	addrCtx, addrCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer addrCancel()
 	addr, err := p.Addr(addrCtx)
 	must.NoError(err, "Failed to get proxy address")
 	must.NotEmpty(addr, "Proxy should have a listening address")
 
-	// Make HTTPS request through proxy (tunnel mode)
+	// Create cert pool with test CA certificate (for proxy trust)
+	certPool := x509.NewCertPool()
+	certPool.AddCert(caCert)
+
+	// Make HTTPS request through proxy (tunnel mode with TLS bump)
 	proxyURL, err := url.Parse("http://" + addr.String())
 	must.NoError(err)
 
@@ -64,8 +82,9 @@ func TestProxy_Integration_HTTPSTunnel(t *testing.T) {
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, // For test server
+				RootCAs: certPool,
 			},
+			DisableKeepAlives: true, // disable keep-alive to prevent persistConn goroutine leaks
 		},
 		Timeout: 5 * time.Second,
 	}
@@ -77,9 +96,13 @@ func TestProxy_Integration_HTTPSTunnel(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	is.Equal(http.StatusOK, resp.StatusCode)
 	is.Equal("Hello from HTTPS backend", string(body))
+
+	// Close idle connections to prevent goroutine leaks in subsequent tests.
+	client.CloseIdleConnections()
 }
 
-// TestProxy_Integration_RealHTTPS tests against a real external HTTPS site.
+// TestProxy_Integration_RealHTTPS tests against a real external HTTPS site
+// using TLS bumping with a test CA.
 func TestProxy_Integration_RealHTTPS(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -90,15 +113,26 @@ func TestProxy_Integration_RealHTTPS(t *testing.T) {
 	must := require.New(t)
 	is := assert.New(t)
 
-	// Start proxy
-	cfg := &proxy.Config{
-		Listen:                   "localhost:0", // random port
+	// Generate test CA for proxy TLS bumping
+	caCert, caKey := testdata.GenerateTestCA(t)
+
+	// Whitelist github.com so requests pass through.
+	wl := reqrules.New()
+	wl.Add(reqrules.Rule{
+		ID:     "allow-github",
+		Method: "GET",
+		Scheme: "https",
+		Host:   "github.com",
+		Path:   "/**",
+	})
+
+	// Start proxy with TLS bumping enabled
+	p := proxy.NewProxy(&proxy.Config{
+		Listen:                   "localhost:0",
 		ConnectionTimeout:        10 * time.Second,
 		RequestTimeout:           30 * time.Second,
-		DisableLocalhostBlocking: true, // Allow test server on 127.0.0.1
-		DisableConnectBlocking:   true, // Allow CONNECT for HTTPS tests
-	}
-	p := proxy.NewProxy(cfg, nil, nil, nil, nil)
+		DisableLocalhostBlocking: true,
+	}, caCert, caKey, nil, wl)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -107,20 +141,27 @@ func TestProxy_Integration_RealHTTPS(t *testing.T) {
 		_ = p.Start(ctx)
 	}()
 
-	// Wait for proxy to start (blocks until listener ready)
+	// Wait for proxy to start
 	addrCtx, addrCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer addrCancel()
 	addr, err := p.Addr(addrCtx)
 	must.NoError(err, "Failed to get proxy address")
 	must.NotEmpty(addr, "Proxy should have a listening address")
 
-	// Test against GitHub (reliable, public HTTPS endpoint)
+	// Create cert pool with test CA certificate
+	certPool := x509.NewCertPool()
+	certPool.AddCert(caCert)
+
 	proxyURL, err := url.Parse("http://" + addr.String())
 	must.NoError(err)
 
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				RootCAs: certPool,
+			},
+			DisableKeepAlives: true, // disable keep-alive to prevent persistConn goroutine leaks
 		},
 		Timeout: 10 * time.Second,
 	}
@@ -138,4 +179,7 @@ func TestProxy_Integration_RealHTTPS(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	must.NoError(err)
 	is.Greater(len(body), 0, "Should receive response body from github.com")
+
+	// Close idle connections to prevent goroutine leaks in subsequent tests.
+	client.CloseIdleConnections()
 }

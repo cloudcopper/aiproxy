@@ -96,12 +96,11 @@ func main() {
 
 	// Initialize proxy server with TLS bumping
 	proxyConfig := &proxy.Config{
-		Listen:                 cfg.Listen,
-		ConnectionTimeout:      cfg.ConnectionTimeout,
-		RequestTimeout:         cfg.RequestTimeout,
-		GlobalRateLimit:        cfg.GlobalRateLimit,
-		PendingTimeout:         cfg.PendingTimeout,
-		DisableConnectBlocking: false,
+		Listen:            cfg.Listen,
+		ConnectionTimeout: cfg.ConnectionTimeout,
+		RequestTimeout:    cfg.RequestTimeout,
+		GlobalRateLimit:   cfg.GlobalRateLimit,
+		PendingTimeout:    cfg.PendingTimeout,
 	}
 	proxyServer := proxy.NewProxy(proxyConfig, certMgr.Certificate(), certMgr.PrivateKey(), blacklist, whitelist)
 
